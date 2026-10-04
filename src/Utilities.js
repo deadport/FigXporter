@@ -23,7 +23,6 @@ var Flags = {
     ApplyPadding: false, // True: will offset to account for padding (requires ApplyAnchorPoint to be enabled)
     ConvertAutoLayoutsToScrollFrames: true, // True: will convert auto layouts to scrolling frames globally
     IgnoreImageStrokeExport: true, // When uploading an element as an image this will remove the stroke on the uploaded image
-    UseLocalProxy: false, // True: use localhost:10582, False: use a proxy in nearest region
 
     // Debugging
     ForceUploadImages: false, // Skips image matching (ignoring cached ids), upload is still overwritten by ImageUploadTesting
@@ -85,12 +84,29 @@ function PushMessageQueue() {
     try {
         if (MessageQueue.length === 0) return;
 
-        let Message = "DESIGN ISSUES:\n"
-        MessageQueue.forEach((info, i) => {
-            Message += `${i + 1}) ${info.message} (Problematic node: "${info.node.name}")${i == 1 ? "" : "\n"}`
-        })
-
+        // Collapse duplicates — the same issue on the same node used to be listed once per
+        // occurrence, spamming the dialog with dozens of identical lines. Group by message+node
+        // and show a count instead.
+        const seen = new Map();
+        for (const info of MessageQueue) {
+            const name = (info.node && info.node.name) || "?";
+            const id = (info.node && info.node.id) || name;
+            const key = info.message + "|" + id;
+            if (seen.has(key)) seen.get(key).count++;
+            else seen.set(key, { message: info.message, name, count: 1 });
+        }
         MessageQueue = [];
+
+        const entries = [...seen.values()];
+        const MAX = 30;
+        let Message = "DESIGN ISSUES:\n";
+        entries.slice(0, MAX).forEach((e, i) => {
+            const times = e.count > 1 ? ` (×${e.count})` : "";
+            // Node-less issues (e.g. a font-wide warning) omit the "(Node: …)" suffix.
+            const where = (e.name && e.name !== "?") ? ` (Node: "${e.name}")` : "";
+            Message += `${i + 1}) ${e.message}${where}${times}\n`;
+        });
+        if (entries.length > MAX) Message += `…and ${entries.length - MAX} more`;
 
         alert(Message)
     } catch (e) {

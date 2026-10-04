@@ -1,9 +1,9 @@
 {
-    "name": "figma-to-roblox",
-    "version": "2.0.0",
+    "name": "figxporter",
+    "version": "2.1.0",
     "description": "Figma to roblox",
     "scripts": {
-        "build": "browserify --outfile ./build.js --entry ./src/main.js",
+        "build": "browserify --entry ./src/main.js | terser --format comments=false --output ./build.js",
         "dev": "nodemon --exec \"npm run build\" --ignore build.js"
     },
     "author": "NoTwistedHere",
@@ -12,5 +12,8 @@
         "create-hash": "^1.2.0",
         "debounce": "^2.2.0",
         "nodemon": "^3.1.9"
+    },
+    "devDependencies": {
+        "terser": "^5.48.0"
     }
 }

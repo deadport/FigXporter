@@ -1,4 +1,11 @@
 node_modules/
-package-lock.json
 TODO.md
 *.exe
+
+# Local development and agent metadata
+.claude/
+.agents/
+.tmp_aeux_0_8_2/
+AGENTS.md
+CLAUDE.md
+snapshot.md

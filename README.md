@@ -1,26 +1,35 @@
-# [Figma to Roblox](https://www.figma.com/community/plugin/1221497650571322872)
+# [FigXporter — Figma to Roblox FREE](https://www.figma.com/community/plugin/1649141134308228780)
 
 If you encounter any bugs/issues please let me know through [github](https://github.com/NoTwistedHere/Figma-to-Roblox/issues) or [discord](https://discord.gg/DWCGss4vry)
 
 
-## How to build:
-Install [Browserify](https://browserify.org/#install) with node: `npm install browserify`, or yarn: `yarn install browserify`
-Build with node: `npm run build`, or yarn: `yarn run build`
+## How to build
+
+Install [Node.js](https://nodejs.org/), then install the project dependencies and
+build the plugin bundle:
+
+```bash
+npm install
+npm run build
+```
+
+Run `npm run dev` while editing `src/` to rebuild automatically.
 
 ## How to use:
-1) Download this repo (Code -> Download as Zip)
-2) Open up figma
-3) In the upper left corner, open up `Figma/File -> Plugins -> Development -> Manage plugins in development`
-4) Select **Import new plugin from manifest** and open up manifest.json
+1. Download this repo (**Code → Download ZIP**) or clone it with Git.
+2. Run `npm install` and `npm run build`.
+3. Open Figma and go to **Figma/File → Plugins → Development → Manage plugins in development**.
+4. Select **Import new plugin from manifest** and choose `manifest.json`.
+
+The Roblox Studio companion plugin is in [`studio-plugin/`](studio-plugin/), and
+the optional Figma ↔ Studio bridge is documented in [`proxy/README.md`](proxy/README.md).
 
 ## Uploading Images:
-1) Navigate to your [Open Cloud API Keys](https://create.roblox.com/dashboard/credentials?activeTab=ApiKeysTab) and create a new API Key, or edit an existing one
-2) **Access Permission**: Add permission "assets" with Read & Write access
-3) **Security**: Add **your** ip address to the allow list, you can otherwise add `0.0.0.0/0` to allow all IPs however this is **not reccomended** unless you have a dynamic ip and consistently running into issues
-4) Copy your api key and enter it into the `Cloud API Key` field, along with your UserId in the next field (or GroupId, toggle with `Upload to Group`)
-2) Enable `Upload Images` and you should be good to go
-
-4) Generate your new Api Key, copy it and in Figma to Roblox, enter/pate it into the `Cloud Api Key` field, along with your UserId in the next field (or GroupId, toggle with `Upload to Group`)
+1. Navigate to your [Open Cloud API Keys](https://create.roblox.com/dashboard/credentials?activeTab=ApiKeysTab) and create a new API key, or edit an existing one.
+2. Add the **Assets** permission with **Read & Write** access.
+3. Add your IP address to the allow list. Avoid `0.0.0.0/0` unless you understand the security implications.
+4. Enter the key in the plugin's **Cloud API Key** field and enter your User ID (or Group ID when **Upload to Group** is enabled).
+5. Enable **Upload Images**.
 
 ## Buttons & Scrollng Frame
 For a scrollingFrame: include 'Scroll' in the name of the frame/container

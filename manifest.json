@@ -1,6 +1,6 @@
 {
-    "name": "Figma To Roblox",
-    "id": "1221497650571322872",
+    "name": "FigXporter - Figma to Roblox FREE",
+    "id": "1649141134308228780",
     "api": "1.0.0",
     "main": "build.js",
     "capabilities": [],
@@ -8,14 +8,13 @@
     "editorType": [ "figma" ],
     "networkAccess": {
         "allowedDomains": [
-            "https://apis.roblox.com/assets/v1/",
-            "https://cdn.jsdelivr.net/npm/water.css@2/out/water.css",
+            "https://apis.roblox.com",
+            "https://*.workers.dev",
             "https://unpkg.com/jszip@3.7.1/dist/jszip.js",
-            "https://img.lightshot.app",
-            "https://figma-to-roblox-proxy.onrender.com",
-            "http://localhost:10582"
+            "https://fonts.googleapis.com",
+            "https://fonts.gstatic.com"
         ],
-        "reasoning": "Localhost is used to optionally allow for local hosting the proxy"
+        "reasoning": "apis.roblox.com: Roblox Open Cloud (image upload). *.workers.dev: the user's own Cloudflare Worker that proxies Roblox API calls (CORS) and relays the export to Roblox Studio. unpkg: JSZip for optional image-zip export. fonts.googleapis/gstatic: UI webfonts."
     },
     "documentAccess": "dynamic-page",
     "ui": "src/index.html",

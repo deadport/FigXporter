@@ -190,6 +190,23 @@ const MarketplaceFonts = {
     ["Builder Sans"]: 16658221428
 };
 
+// Roblox built-in font families (rbxasset://fonts/families/<file>.json), keyed by a normalized
+// (lowercase, alphanumeric-only) family name -> the correctly-cased file name. Used so a Figma
+// font that isn't in the Marketplace table but IS a Roblox built-in still resolves, instead of
+// silently downgrading to the ugly LegacyArial fallback.
+const RobloxLocalFonts = {
+    arial: "Arial", bangers: "Bangers", buildersans: "BuilderSans", buildersansextrabold: "BuilderSansExtraBold",
+    buildersansmedium: "BuilderSansMedium", buildersansbold: "BuilderSansExtraBold",
+    creepster: "Creepster", denkone: "DenkOne", fondamento: "Fondamento", fredokaone: "FredokaOne",
+    fredoka: "FredokaOne", gotham: "GothamSSm", gothamssm: "GothamSSm", grenzegotisch: "GrenzeGotisch",
+    highwaygothic: "HighwayGothic", indieflower: "IndieFlower", josefinsans: "JosefinSans", jura: "Jura",
+    kalam: "Kalam", luckiestguy: "LuckiestGuy", merriweather: "Merriweather", michroma: "Michroma",
+    montserrat: "Montserrat", nunito: "Nunito", oswald: "Oswald", patrickhand: "PatrickHand",
+    permanentmarker: "PermanentMarker", roboto: "Roboto", robotocondensed: "RobotoCondensed",
+    robotomono: "RobotoMono", sarpanch: "Sarpanch", sourcesanspro: "SourceSansPro", sourcesans: "SourceSansPro",
+    specialelite: "SpecialElite", titilliumweb: "TitilliumWeb", ubuntu: "Ubuntu"
+};
+
 function getGradientRotation(gradientTransform) {
     const angle = Math.atan2(gradientTransform[0][0], gradientTransform[0][1]) * 180 / Math.PI;
 
@@ -201,6 +218,7 @@ module.exports = {
     // Enums
     FontStyle: FontStyle,
     MarketplaceFonts: MarketplaceFonts,
+    RobloxLocalFonts: RobloxLocalFonts,
 
     TextXAlignments: [
         "LEFT",

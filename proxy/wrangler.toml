@@ -1,0 +1,10 @@
+name = "figma-to-roblox-proxy"
+main = "worker.js"
+compatibility_date = "2024-09-01"
+
+# KV namespace backing the Figma <-> Studio bridge (/bridge/:code).
+# Create it once with:  wrangler kv namespace create BRIDGE
+# then paste the returned id below.
+[[kv_namespaces]]
+binding = "BRIDGE"
+id = "5abfee11a5614fd5bcd5ea656be013aa"
