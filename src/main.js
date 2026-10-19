@@ -752,6 +752,7 @@ async function RunPlugin() { // this is technecally a codegen plugin?
 
     if (Nodes) {
         try {
+            let UnresolvedImageCount = 0;
             // [^}]+ — UploadIds can be sha256 hashes, asset ids or Figma Node.ids ("196:58",
             // "I196:58;42:7"). The old charset missed "_" and ";", leaving literal
             // "{FTR_...}" strings in the rbxmx (images then rendered as nothing).
@@ -760,6 +761,7 @@ async function RunPlugin() { // this is technecally a codegen plugin?
                 console.log(ExportedImage);
 
                 if (!ExportedImage || !ExportedImage.Properties.Image || /^{FTR_/.test(ExportedImage.Properties.Image)) {
+                    UnresolvedImageCount += 1;
                     console.warn(`[FTR] No uploaded image found for placeholder "${Match}", using transparent placeholder`);
                     return "rbxasset://textures/StudioSharedUI/TransparentWhiteImagePlaceholder.png";
                 }
@@ -778,7 +780,11 @@ async function RunPlugin() { // this is technecally a codegen plugin?
                 });
             }
 
-            Notify("Successfully exported");
+            if (UnresolvedImageCount > 0) {
+                NotifyError(`Export finished with ${UnresolvedImageCount} image(s) unresolved. Check the plugin console; those images were exported as placeholders.`, false);
+            } else {
+                Notify("Successfully exported");
+            }
         } catch (e) {
             NotifyError("Figma to Roblox experienced an unexpected error, please make a bug report in discord https://discord.gg/DWCGss4vry; " + e.message);
         }

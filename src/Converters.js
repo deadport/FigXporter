@@ -359,30 +359,9 @@ function ExportImage(Node, Properties, CustomExport, ForceReupload, FullWhiteout
     if (!Settings.UploadImages && !Settings.DownloadImages) return Properties.Image = `rbxassetid://${AssetId}`;
     if (AbortImageUpload) return;
 
-    // Image Hashing
-    if (Node.vectorPaths) { // hash vector, Flags.ExportVectorsAsImage should be true if we get here
-        var CombinedVecPaths = "";
-
-        Node.vectorPaths.forEach(vectorPath => CombinedVecPaths = CombinedVecPaths + vectorPath.data + vectorPath.windingRule);
-
-        // Two vectors can share identical paths but be mirrored/rotated via their transform
-        // (e.g. up/down arrows) — the flip is BAKED into the exported PNG, so it must be part
-        // of the hash or both would dedupe into one upload and show the same orientation.
-        if (Node.relativeTransform) {
-            CombinedVecPaths += JSON.stringify([Node.relativeTransform[0].slice(0, 2), Node.relativeTransform[1].slice(0, 2)]);
-        }
-
-        Properties._ImageHash = createHash("sha256").update(CombinedVecPaths).digest("hex");
-    }
-
     let ExportNode = Node;
     let NodeWasCloned = false;
     if (Node.fills && Node.fills[0]) {
-        // A node with children gets them BAKED into the exported PNG, so the image fill's
-        // own hash can't identify the result — panels sharing a background texture but with
-        // different text/icons would collide into one upload and all show the same picture.
-        if (!Properties._ImageHash && !(Node.children && Node.children.length)) Properties._ImageHash = Node.fills[0].imageHash;
-
         if (FullWhiteout) {
             NodeWasCloned = true;
             ExportNode = Node.clone();
@@ -474,174 +453,113 @@ function ExportImage(Node, Properties, CustomExport, ForceReupload, FullWhiteout
 
     //
 
-    // Node.id as the last resort — it's UNIQUE, unlike layer names: "TabBG"/"Title" repeat
-    // across panels, and a name-based id collapsed different images into one shared upload
-    // (every panel then showed the same texture, or an unresolved {FTR_...} placeholder).
-    let UploadId = OperationId || Properties._ImageHash || AssetId || Node.id;
-
-    if (!UploadId || UploadId.length < 2) NotifyError(`Node "${Node.name}" {${Node.id}} has an invalid UploadId`, true);
-
-    //
-
-    if (!ForceReupload && !Flags.ForceUploadImages && Node.getPluginData("ImageHash") === Properties._ImageHash) {
-        if (AssetId && AssetId.length > 5 && !AssetId.match(/TransparentWhiteImagePlaceholder.png/)) {
-            // Check if image hashes match
-
-            console.log("Image has not changed, using ImageId:", AssetId)
-            Properties.Image = `rbxassetid://${AssetId}`
-            // TryDownloadImage exports the clone ASYNCHRONOUSLY — removing it right away
-            // would kill the node before exportAsync runs. Let the download own the cleanup.
-            if (Settings.DownloadImages) TryDownloadImage(true);
-            else if (NodeWasCloned) ExportNode.remove();
-            return;
-        }
-
-        if (OperationId) {
-            // try fetching before attempting to re-upload
-            console.log("Image was uploaded, checking Operation (Id):", OperationId);
-
-            Properties.Image = `{FTR_${OperationId}}`
-            Node.setPluginData("ImageHash", Properties._ImageHash);
-
-            ImageExports[OperationId] = {
-                Node: Node,
-                Properties: Properties,
-                UploadId: OperationId
-            }
-
-            figma.ui.postMessage({
-                type: "CheckOperation",
-                data: {
-                    Id: OperationId
-                }
-            });
-
-            if (NodeWasCloned) ExportNode.remove();
-            return OperationId
-        }
-    }
-
-    if (!UploadId) {
-        console.warn(`UploadId is undefned for node "${Node.name}" (${Node.id})! Generating a random number..`)
-
-        while (!UploadId || ImageUploads.find((id) => id === UploadId)) {
-            UploadId = Math.random() * 1024;
-        }
-    }
-
-    //Properties.UploadId = UploadId;
+    // Use a temporary per-node id until exportAsync gives us the actual rendered bytes.
+    // A Figma fill's imageHash doesn't include crop, transforms, or other baked appearance.
+    let UploadId = Node.id;
     Properties.Image = `{FTR_${UploadId}}`
-
-    let IncrementImageCount = true;
-
-    if (ImageUploads.find((id) => id === UploadId)) {
-        const OtherNode = ImageExports[UploadId].Node;
-
-        if (OtherNode.width * OtherNode.height >= Node.width * Node.height) {
-            // Duplicate image, existing copy is big enough — this clone is done for.
-            // (Only remove it HERE: the overwrite path below still needs ExportNode for
-            // exportAsync — removing it up-front crashed with "node ... does not exist".)
-            if (NodeWasCloned) ExportNode.remove();
-            return UploadId;
-        }
-
-        IncrementImageCount = false;
-        console.warn(`[Image Export] Overwriting Node "${OtherNode.name}" with a larger version, "${Node.name}"`)
-    }
-    ImageUploads.push(UploadId);
-    if (IncrementImageCount) ImagesRemaining += 1;
-    if (Properties._ImageHash) Node.setPluginData("ImageHash", Properties._ImageHash);
-
-    ImageExports[UploadId] = { // Used as a placeholder
-        Node: Node,
-        Properties: Properties,
-        Bytes: undefined, // Uint8Array
-        UploadId: UploadId
-    }
+    ImagesRemaining += 1;
 
     if (ImageUploadTimeoutId) clearTimeout(ImageUploadTimeoutId);
 
     ExportNode.exportAsync(CustomExport || Settings.DefaultExport).then(Bytes => {
         if (NodeWasCloned) ExportNode.remove();
+        const ContentHash = createHash("sha256").update(Bytes).digest("hex");
+        Properties._ImageHash = ContentHash;
+
+        // LoopNodes serialises the temporary {FTR_<node id>} reference before this
+        // async render completes. Keep that reference mapped as well as the final
+        // content hash, including all cache/deduplication paths below.
+        const RegisterNodeReference = (ImageInfo) => {
+            ImageExports[Node.id] = ImageInfo;
+        };
+
+        // Reuse a previous asset only after verifying the exact rendered PNG matches.
+        if (!ForceReupload && !Flags.ForceUploadImages && AssetId &&
+            Node.getPluginData("ImageHash") === ContentHash &&
+            AssetId.length > 5 && !AssetId.match(/TransparentWhiteImagePlaceholder.png/)) {
+            console.log(`[FTR][Export] (${ContentHash}) Rendered image unchanged, reusing AssetId:`, AssetId);
+            Properties.Image = AssetId.match(/^rbxasset/) ? AssetId : `rbxassetid://${AssetId}`;
+            Node.setPluginData("ImageHash", ContentHash);
+            const ResolvedExport = {
+                Node,
+                Properties,
+                Aliases: [],
+                Bytes,
+                UploadId: ContentHash,
+                AssetId: Properties.Image,
+                Status: "uploaded"
+            };
+            RegisterNodeReference(ResolvedExport);
+            if (!ImageExports[ContentHash]) ImageExports[ContentHash] = ResolvedExport;
+            if (Settings.DownloadImages) {
+                figma.ui.postMessage({ type: "ExportImage", data: {
+                    Data: Bytes,
+                    Name: Properties.Name.substr(0, 30),
+                    Format: (CustomExport ? CustomExport.format : "PNG").toLowerCase()
+                }});
+            }
+            ImagesRemaining -= 1;
+            return;
+        }
+
+        const ExistingExport = ImageExports[ContentHash];
+        if (ExistingExport && ExistingExport.AssetId) {
+            const CachedAssetId = ExistingExport.AssetId.match(/rbxasset/) ? ExistingExport.AssetId : `rbxassetid://${ExistingExport.AssetId}`;
+            Properties.Image = CachedAssetId;
+            Node.setPluginData("AssetId", ExistingExport.AssetId);
+            Node.setPluginData("ImageHash", ContentHash);
+            RegisterNodeReference(ExistingExport);
+            if (Settings.DownloadImages) {
+                figma.ui.postMessage({ type: "ExportImage", data: {
+                    Data: Bytes,
+                    Name: Properties.Name.substr(0, 30),
+                    Format: (CustomExport ? CustomExport.format : "PNG").toLowerCase()
+                }});
+            }
+            ImagesRemaining -= 1;
+            return;
+        }
+
+        if (ExistingExport && ExistingExport.Status === "pending") {
+            // Only byte-identical rendered PNGs share an asset. Preserve every instance
+            // reference so upload completion updates all matching layers.
+            ExistingExport.Aliases.push({ Node, Properties });
+            Properties.Image = `{FTR_${ContentHash}}`;
+            Node.setPluginData("ImageHash", ContentHash);
+            RegisterNodeReference(ExistingExport);
+            ImagesRemaining -= 1;
+            return;
+        }
+
+        UploadId = ContentHash;
+        Properties.Image = `{FTR_${UploadId}}`;
+        Node.setPluginData("ImageHash", ContentHash);
         Node.setPluginData("AssetId", "");
         Node.setPluginData("OperationId", "");
+        ImageUploads.push(UploadId);
+        ImageUploadsReady += 1;
+        ImageExports[UploadId] = {
+            Node,
+            Properties,
+            Aliases: [],
+            Bytes,
+            UploadId,
+            Status: "pending"
+        };
+        RegisterNodeReference(ImageExports[UploadId]);
 
-        for (const [key, value] in ImageExports) {
-            if (value.Bytes == Bytes) {
-                UploadId = key
-                Properties.Image = `{FTR_${key}}`
-                ImagesRemaining -= 1;
-                return;
-            };
-        }
-
-        ImageExports[UploadId].Bytes = Bytes; // Uint8Array
-        if (IncrementImageCount) ImageUploadsReady += 1;
-
-        if (!Properties._ImageHash) {
-            const _ImageHash = createHash("sha256").update(Bytes).digest("hex");
-
-            if (_ImageHash) {
-                Properties._ImageHash = _ImageHash;
-
-                if (!ForceReupload && !Flags.ForceUploadImages) {
-                    if (AssetId && Node.getPluginData("ImageHash") === _ImageHash) {
-                        console.log(`[FTR][Export] (${UploadId}) Node exported image has not changed, reusing AssetId:`, AssetId)
-
-                        figma.ui.postMessage({
-                            type: "ExportImage",
-                            data: {
-                                Data: Bytes,
-                                Name: Properties.Name.substr(0, 30),
-                                Format: (CustomExport ? CustomExport.format : "PNG").toLowerCase()
-                            }
-                        });
-
-                        Properties.Image = `rbxassetid://${AssetId}`
-                        UpdateImage({id: UploadId, data: {assetId: AssetId}});
-                        return;
-                    } else if (AssetId) console.warn(`[FTR][Export] (${UploadId}) Node's image has changed, re-uploading`)
-
-                    if (OperationId) {
-                        // try fetching before attempting to re-upload
-
-                        if (Node.getPluginData("ImageHash") === _ImageHash) {
-                            console.log("Image was uploaded, checking Operation (Id):", OperationId);
-                            Properties.Image = `{FTR_${OperationId}}`
-                            Node.setPluginData("ImageHash", _ImageHash);
-
-                            figma.ui.postMessage({
-                                type: "CheckOperation",
-                                data: {
-                                    Id: OperationId
-                                }
-                            });
-
-                            return OperationId
-                        } else console.log("Operation exists but Hashes don't match, uploading..")
-                    }
-                }
-
-                if (!FullWhiteout) {
-                    Properties.Children = [];
-                }
-
-                Node.setPluginData("ImageHash", _ImageHash);
-            } else {
-                NotifyError(`FAILED to create an image hash for Node "${Node.name}" (${Node.id}), this means it might be reuploaded every time`)
-                console.warn("FAILED to create an ImageHash for Node", Node, Properties);
-            }
-        }
-
+        if (!FullWhiteout) Properties.Children = [];
         if (AbortImageUpload) return;
-
-        // Test post image upload with template data
-        if (Flags.ImageUploadTesting) UpdateImage({id: UploadId, data: Flags.ImageUploadTestData});
-        // Upload Image
+        if (Flags.ImageUploadTesting) UpdateImage({ id: UploadId, data: Flags.ImageUploadTestData });
         else QueueImageUpload(Bytes, Properties.Name.substr(0, 30), (CustomExport ? CustomExport.format : "PNG").toLowerCase(), UploadId);
+    }).catch(e => {
+        if (NodeWasCloned) ExportNode.remove();
+        ImagesRemaining -= 1;
+        NotifyError(`FAILED to render image for Node "${Node.name}": ${e.message}`);
+        console.error(`[FTR][Export] Failed to render image for Node "${Node.name}" (${Node.id})`, e);
     });
 
-    return UploadId
+    return Node.id
 }
 
 function UpdateImage(msg, abort) {
@@ -659,59 +577,49 @@ function UpdateImage(msg, abort) {
         console.warn(`Failed to find Image Node "${msg.id}":`, msg);
         ImagesRemaining -= 1;
         return;
-    } else if (typeof(msg.data) === "string") {
-        //ImageInfo.Node.setPluginData("OperationId", "");
-        //figma.notify(`Failed to upload Image Node "${msg.id}": ${msg.data}`);
-        console.warn(`Failed to upload Image Node "${msg.id}":`, msg);
-        ImagesRemaining -= 1
+    }
+
+    // An upload failure used to leave a hash entry that looked reusable on the next
+    // conversion. Duplicate layers then attached to that entry, skipped the upload
+    // queue, and silently exported as white placeholders. Only pending entries may
+    // collect aliases; failed entries must be eligible for a fresh upload next run.
+    let Content = typeof msg.data === "string" ? null : (msg.data && (msg.data.imageContent || msg.data.assetId));
+    const UploadFailed = !Content || /TransparentWhiteImagePlaceholder\.png/.test(Content);
+
+    const Targets = [
+        { Node: ImageInfo.Node, Properties: ImageInfo.Properties },
+        ...(ImageInfo.Aliases || [])
+    ];
+
+    if (UploadFailed) {
+        ImageInfo.Status = "failed";
+        console.warn(`Failed to upload image "${ImageInfo.Node.name}" (${msg.id}); using previous asset or placeholder.`, msg);
+
+        for (const Target of Targets) {
+            let PreviousAssetId = Target.Node.getPluginData("AssetId");
+            if (PreviousAssetId && !PreviousAssetId.match(/rbxasset/)) PreviousAssetId = `rbxassetid://${PreviousAssetId}`;
+            const FallbackImage = PreviousAssetId || PLACEHOLDER_IMAGE;
+            Target.Properties.Image = FallbackImage;
+            if (Target.Properties._ReplacedBy) Target.Properties._ReplacedBy.Image = FallbackImage;
+        }
+
+        ImagesRemaining -= 1;
         return;
     }
 
-    // let ModerationResult = msg.data.moderationResult
+    ImageInfo.Status = "uploaded";
+    ImageInfo.AssetId = Content;
 
-    // if (Flags.AwaitModeration && ModerationResult && (ModerationResult.moderationState != "Approved" && ModerationResult.moderationState != "MODERATION_STATE_APPROVED")) {
-    //     if (msg.co && Flags.ReuploadStuckImages) {
-    //         ExportImage(ImageInfo.Node, ImageInfo.Properties, false)
-    //         return;
-    //     }else if (ModerationResult.moderationState === "Reviewing") {
-    //         figma.notify(`Image Element ${msg.id} took too long to pass moderation, Image Id: ${msg.data.assetId || msg.data.path}`)
-    //         console.warn(`Image Element ${msg.id} took too long to pass moderation:`, ModerationResult, msg);
-    //     } else {
-    //         figma.notify(`Image Element ${msg.id} failed moderation (check console for more info); moderation state: ${ModerationResult.moderationState}`);
-    //         console.warn(`Image Element ${msg.id} failed moderation:`, ModerationResult, msg);
-    //     }
-
-    //     //ImagesRemaining -= 1; return;
-    // }
-
-    let Content = msg.data.imageContent || msg.data.assetId;
-
-    if (ImageInfo.Properties._ReplacedBy) {
-        ImageInfo.Properties = ImageInfo.Properties._ReplacedBy;
-        //ImageInfo.Node = ImageInfo.Properties._OriginalNode; - DON'T REPLACE NODE
-    }
-
-    if (!Content.match(/TransparentWhiteImagePlaceholder.png/)) {
-        console.log(`[FTR][Export] (${msg.id}) Applying AssetId "${Content}" to Node "${ImageInfo.Node.name}"`);
-
-        ImageInfo.Node.setPluginData("AssetId", Content);
-
-        if (!Content.match(/rbxasset/)) {
-            Content = "rbxassetid://" + Content
-        }
-
-        ImageInfo.Properties.Image = Content
-        console.log(`[FTR][Export] (${msg.id}) Node "${ImageInfo.Node.name}" -> Image="${ImageInfo.Properties.Image}", ImageTransparency=${ImageInfo.Properties.ImageTransparency}, BackgroundTransparency=${ImageInfo.Properties.BackgroundTransparency}`);
-    } else {
-        let PreviousAssetId = ImageInfo.Node.getPluginData("AssetId");
-
-        if (PreviousAssetId && !PreviousAssetId.match(/rbxasset/)) {
-            PreviousAssetId = "rbxassetid://" + PreviousAssetId;
-        }
-
-        console.warn(`[FTR][Export] (${msg.id}) Using placeholder image for Node "${ImageInfo.Node.name}" (upload failed or disabled). Falling back to: ${PreviousAssetId || Content}`);
-
-        ImageInfo.Properties.Image = PreviousAssetId || Content;
+    for (const Target of Targets) {
+        const ResolvedImage = Content.match(/rbxasset/) ? Content : `rbxassetid://${Content}`;
+        Target.Node.setPluginData("AssetId", Content);
+        Target.Node.setPluginData("ImageHash", ImageInfo.UploadId);
+        // Keep both objects in sync: LoopNodes may have copied a special "background"
+        // child onto its parent, while GetImageFromOperation later resolves the child's
+        // original Properties object to replace the XML's temporary token.
+        Target.Properties.Image = ResolvedImage;
+        if (Target.Properties._ReplacedBy) Target.Properties._ReplacedBy.Image = ResolvedImage;
+        console.log(`[FTR][Export] (${msg.id}) Applied shared image to Node "${Target.Node.name}"`);
     }
 
     ImagesRemaining -= 1;
@@ -846,10 +754,8 @@ const PropertyTypes = {// the only return value should be nothing or an object c
         }
 
         if (Fill.type === "IMAGE" && (Settings.UploadImages || Flags.AlwaysExportImages)) {
-            // Export image
-            // Children get baked into the exported PNG, so the fill's own hash only
-            // identifies the result for leaf nodes (see the matching guard in ExportImage).
-            if (!(Node.children && Node.children.length)) Object._ImageHash = Fill.imageHash;
+            // ExportImage hashes the final rendered PNG. Fill.imageHash alone doesn't
+            // account for cropping, transforms, paint overlays or baked colour changes.
             Object.Class = "ImageLabel"; // or ImageButton?!
             Object.ImageColor3 = {R: 1, G: 1, B: 1};
 
@@ -2216,6 +2122,13 @@ function OnStart() {
     AbortImageUpload = false;
     UploadQueue = [];
     UploadStats = { total: 0, finished: 0, failed: 0 };
+
+    // ImageExports is only the lookup table used to resolve {FTR_...} references
+    // in this export's XML. Keeping entries across exports can make a later run
+    // attach to a stale pending/failed record and skip QueueImageUpload entirely.
+    // Successfully uploaded assets are cached independently on each Figma node via
+    // AssetId + ImageHash, so this per-export table is safe to clear here.
+    Object.keys(ImageExports).forEach((UploadId) => delete ImageExports[UploadId]);
 }
 
 module.exports = {
