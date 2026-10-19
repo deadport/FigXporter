@@ -319,7 +319,7 @@ async function ProcessUploadQueue() {
             UploadStats.finished += 1;
         } catch (e) {
             console.error(`[FTR][Upload] (${UploadId}) FAILED:`, e);
-            NotifyError(`FAILED to upload image "${Name}", got error "${e.message}". Help can be found in the discord server https://discord.gg/DWCGss4vry`, false, {
+            NotifyError(`FAILED to upload image "${Name}": ${e.message}. Check the Worker URL, upload settings, and plugin console for details.`, false, {
                 timeout: 5000,
                 error: true,
             });
@@ -1985,7 +1985,7 @@ const XMLTypes = {
 }
 
 function GetNodeProperties(Node, Settings, ParentObject) {
-    //if (!NodeTypes[Node.type]) NotifyError(`Unknown node type "${Node.type}", please create a suggestion on the discord server`)
+    //if (!NodeTypes[Node.type]) NotifyError(`Unknown node type "${Node.type}"; report it in the GitHub issue tracker.`)
     const Properties = (NodeTypes[NodeTypes[Node.type] ? Node.type : "OTHER"])(Node, Settings);
 
     if (!Properties) return;
@@ -2033,7 +2033,7 @@ function GetNodeProperties(Node, Settings, ParentObject) {
             try {
                 PropertyTypes[i](Node[i], Properties, Node, ParentObject);
             } catch (e) {
-                NotifyImportantMessage(`Unhandled error while converting property "${i}" for Node "${Node.name}", error: "${e}"\nPlease report this in #bug-reports OR #plugin-help in the discord server (https://discord.gg/DWCGss4vry)`)
+                NotifyImportantMessage(`Unhandled error while converting property "${i}" for Node "${Node.name}": "${e}"\nPlease report this in the GitHub issue tracker: https://github.com/deadport/Figma-to-Roblox/issues`)
             }
         }
     });
