@@ -1,6 +1,6 @@
 # [FigXporter — Figma to Roblox FREE](https://www.figma.com/community/plugin/1649141134308228780)
 
-For bugs, questions, or suggestions, use the [GitHub issue tracker](https://github.com/deadport/Figma-to-Roblox/issues).
+For bugs, questions, or suggestions, use the [GitHub issue tracker](https://github.com/deadport/FigXporter/issues).
 
 
 ## How to build

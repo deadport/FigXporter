@@ -2033,7 +2033,7 @@ function GetNodeProperties(Node, Settings, ParentObject) {
             try {
                 PropertyTypes[i](Node[i], Properties, Node, ParentObject);
             } catch (e) {
-                NotifyImportantMessage(`Unhandled error while converting property "${i}" for Node "${Node.name}": "${e}"\nPlease report this in the GitHub issue tracker: https://github.com/deadport/Figma-to-Roblox/issues`)
+                NotifyImportantMessage(`Unhandled error while converting property "${i}" for Node "${Node.name}": "${e}"\nPlease report this in the GitHub issue tracker: https://github.com/deadport/FigXporter/issues`)
             }
         }
     });
