@@ -21,8 +21,12 @@ Run `npm run dev` while editing `src/` to rebuild automatically.
 3. Open Figma and go to **Figma/File → Plugins → Development → Manage plugins in development**.
 4. Select **Import new plugin from manifest** and choose `manifest.json`.
 
-The Roblox Studio companion plugin is in [`studio-plugin/`](studio-plugin/), and
-the optional Figma ↔ Studio bridge is documented in [`proxy/README.md`](proxy/README.md).
+The Roblox Studio companion plugin is in [`studio-plugin/`](studio-plugin/), including a
+ready-to-install [`FigXporter.rbxmx`](studio-plugin/FigXporter.rbxmx). Run
+`npm run build:studio-plugin` to regenerate it after editing the Lua source, or
+`npm run build:all` to build both the Figma bundle and Studio plugin. Installation details
+and the optional Figma ↔ Studio bridge are documented in [`studio-plugin/README.md`](studio-plugin/README.md)
+and [`proxy/README.md`](proxy/README.md).
 
 ## Uploading Images:
 1. Navigate to your [Open Cloud API Keys](https://create.roblox.com/dashboard/credentials?activeTab=ApiKeysTab) and create a new API key, or edit an existing one.

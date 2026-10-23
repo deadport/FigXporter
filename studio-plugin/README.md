@@ -1,4 +1,4 @@
-# Figma to Roblox — Image Fixer (Studio plugin)
+# FigXporter — Roblox Studio bridge plugin
 
 ## Why this is needed
 
@@ -20,14 +20,20 @@ inside Studio, via `InsertService:LoadAsset`. That's what this plugin does, in o
 
 ## Install (local plugin)
 
-1. In Roblox Studio, open the **Plugins** tab → **Plugins Folder**. This opens your local
-   plugins directory.
-2. Copy [`FigmaImageFixer.server.lua`](FigmaImageFixer.server.lua) into that folder.
-3. Back in Studio, click **Plugins Folder** is not needed again — Studio auto-loads it.
-   A new **"Figma to Roblox"** toolbar with a **"Fix Images"** button appears.
+1. Run `npm run build:studio-plugin` from the repository root whenever the plugin source
+   changes. The command updates [`FigXporter.rbxmx`](FigXporter.rbxmx) from
+   [`FigmaImageFixer.server.lua`](FigmaImageFixer.server.lua).
+2. In Roblox Studio, open the **Plugins** tab → **Plugins Folder**.
+3. Copy [`FigXporter.rbxmx`](FigXporter.rbxmx) into the local Plugins folder and restart
+   Studio (or reload the local plugin). The **FigXporter** toolbar contains **Pull from
+   Figma** and **Fix Images**.
 
-> Alternatively, to build a `.rbxmx`/`.rbxm` plugin: paste the script into a `Script` inside
-> Studio, right-click it → **Save as Local Plugin**.
+Alternatively, run `studio-plugin/install.ps1` from PowerShell to copy the packaged plugin
+to the local Roblox Plugins folder automatically.
+
+The `.server.lua` file is the editable source; the `.rbxmx` is the ready-to-install local
+plugin package. The plugin asks for your own Worker URL and bridge code in Studio settings;
+no personal API keys or session values are embedded in the package.
 
 ## Usage
 

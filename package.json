@@ -4,6 +4,8 @@
     "description": "Figma to roblox",
     "scripts": {
         "build": "browserify --entry ./src/main.js | terser --format comments=false --output ./build.js",
+        "build:studio-plugin": "node ./studio-plugin/build-rbxmx.js",
+        "build:all": "npm run build && npm run build:studio-plugin",
         "dev": "nodemon --exec \"npm run build\" --ignore build.js"
     },
     "author": "deadport",

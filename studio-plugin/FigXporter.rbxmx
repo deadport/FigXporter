@@ -1,0 +1,958 @@
+<?xml version="1.0" encoding="utf-8"?>
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+	<External>null</External>
+	<External>nil</External>
+	<Item class="Script" referent="RBX1">
+		<Properties>
+			<ProtectedString name="Source">--!nonstrict
+-- Figma to Roblox — Studio bridge + Image Fixer
+--
+-- WHAT THIS DOES:
+--   * "Pull from Figma": fetches the .rbxmx that the Figma plugin pushed to the
+--     Cloudflare Worker bridge (/bridge/:code), rebuilds it as real instances under
+--     StarterGui (or the current selection), then runs the image fix automatically.
+--   * "Fix Images": resolves uploaded Decal ids to their Texture ids (and corrects
+--     0-255 ImageColor3 values) so imported images render. Run it on its own after a
+--     manual .rbxmx import.
+--
+-- WHY THE XML PARSER:
+--   Roblox gives plugins no API to deserialize an .rbxmx STRING into instances
+--   (game:GetObjects only takes asset urls). HttpService can fetch the string, so the
+--   bridge has to parse the exporter's XML and build the instances itself. The parser
+--   below only needs to understand the handful of property element forms this specific
+--   exporter emits.
+--
+-- WHY DECAL -&gt; TEXTURE:
+--   The Open Cloud Assets API can only create Decal assets (a wrapper pointing at the
+--   real Texture, which has a DIFFERENT id). ImageLabel.Image does not resolve a Decal
+--   id, so images show blank. InsertService:LoadAsset (Studio-only) exposes the inner
+--   Texture id; that resolution can only happen here.
+
+local HttpService = game:GetService("HttpService")
+local InsertService = game:GetService("InsertService")
+local ChangeHistoryService = game:GetService("ChangeHistoryService")
+local Selection = game:GetService("Selection")
+local StarterGui = game:GetService("StarterGui")
+
+--------------------------------------------------------------------------------
+-- Toolbar + dock widget
+--------------------------------------------------------------------------------
+
+local toolbar = plugin:CreateToolbar("FigXporter")
+
+-- Single toolbar button — toggles the dock widget.
+local mainButton = toolbar:CreateButton(
+&#9;"FigXporter",
+&#9;"Open the FigXporter panel",
+&#9;"rbxassetid://127759244827527"
+)
+
+local widget = plugin:CreateDockWidgetPluginGui(
+&#9;"FigmaToRoblox_Bridge",
+&#9;DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, false, false, 260, 300, 230, 280)
+)
+widget.Title = "FigXporter"
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.fromScale(1, 1)
+frame.BackgroundColor3 = Color3.fromRGB(10, 10, 15)
+frame.BorderSizePixel = 0
+frame.Parent = widget
+
+local frameCorner = Instance.new("UICorner")
+frameCorner.CornerRadius = UDim.new(0, 8)
+frameCorner.Parent = frame
+
+local frameStroke = Instance.new("UIStroke")
+frameStroke.Color = Color3.fromRGB(40, 40, 52)
+frameStroke.Thickness = 1
+frameStroke.Parent = frame
+
+local layout = Instance.new("UIListLayout")
+layout.Padding = UDim.new(0, 6)
+layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+layout.VerticalAlignment = Enum.VerticalAlignment.Top
+-- Order children by LayoutOrder, NOT by Name (default would sort TextBox/TextButton/TextLabel alphabetically).
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Parent = frame
+
+local padding = Instance.new("UIPadding")
+padding.PaddingTop = UDim.new(0, 12)
+padding.PaddingLeft = UDim.new(0, 12)
+padding.PaddingRight = UDim.new(0, 12)
+padding.Parent = frame
+
+-- Worker URL field (persisted)
+local workerLabel = Instance.new("TextLabel")
+workerLabel.Size = UDim2.new(1, 0, 0, 16)
+workerLabel.BackgroundTransparency = 1
+workerLabel.Text = "Worker URL"
+workerLabel.TextColor3 = Color3.fromRGB(160, 160, 171)
+workerLabel.TextXAlignment = Enum.TextXAlignment.Left
+workerLabel.Font = Enum.Font.GothamMedium
+workerLabel.TextSize = 14
+workerLabel.LayoutOrder = 1
+workerLabel.Parent = frame
+
+local workerBox = Instance.new("TextBox")
+workerBox.Size = UDim2.new(1, 0, 0, 26)
+workerBox.PlaceholderText = "https://&lt;name&gt;.workers.dev"
+workerBox.Text = plugin:GetSetting("FTR_WorkerUrl") or ""
+workerBox.TextColor3 = Color3.fromRGB(232, 232, 236)
+workerBox.PlaceholderColor3 = Color3.fromRGB(107, 107, 118)
+workerBox.BackgroundColor3 = Color3.fromRGB(26, 26, 36)
+workerBox.BorderSizePixel = 0
+workerBox.ClearTextOnFocus = false
+workerBox.Font = Enum.Font.Gotham
+workerBox.TextSize = 14
+workerBox.TextXAlignment = Enum.TextXAlignment.Left
+workerBox.ClipsDescendants = true
+workerBox.LayoutOrder = 2
+workerBox.Parent = frame
+
+local workerBoxCorner = Instance.new("UICorner")
+workerBoxCorner.CornerRadius = UDim.new(0, 6)
+workerBoxCorner.Parent = workerBox
+
+local workerBoxStroke = Instance.new("UIStroke")
+workerBoxStroke.Color = Color3.fromRGB(40, 40, 52)
+workerBoxStroke.Thickness = 1
+workerBoxStroke.Parent = workerBox
+
+workerBox.FocusLost:Connect(function()
+&#9;plugin:SetSetting("FTR_WorkerUrl", workerBox.Text)
+end)
+
+-- Session Code field (persisted)
+local codeLabel = Instance.new("TextLabel")
+codeLabel.Size = UDim2.new(1, 0, 0, 16)
+codeLabel.BackgroundTransparency = 1
+codeLabel.Text = "Session Code"
+codeLabel.TextColor3 = Color3.fromRGB(160, 160, 171)
+codeLabel.TextXAlignment = Enum.TextXAlignment.Left
+codeLabel.Font = Enum.Font.GothamMedium
+codeLabel.TextSize = 14
+codeLabel.LayoutOrder = 3
+codeLabel.Parent = frame
+
+local codeBox = Instance.new("TextBox")
+codeBox.Size = UDim2.new(1, 0, 0, 26)
+codeBox.PlaceholderText = "e.g. mygame"
+codeBox.Text = plugin:GetSetting("FTR_BridgeCode") or ""
+codeBox.TextColor3 = Color3.fromRGB(232, 232, 236)
+codeBox.PlaceholderColor3 = Color3.fromRGB(107, 107, 118)
+codeBox.BackgroundColor3 = Color3.fromRGB(26, 26, 36)
+codeBox.BorderSizePixel = 0
+codeBox.ClearTextOnFocus = false
+codeBox.Font = Enum.Font.Gotham
+codeBox.TextSize = 16
+codeBox.TextXAlignment = Enum.TextXAlignment.Left
+codeBox.ClipsDescendants = true
+codeBox.LayoutOrder = 4
+codeBox.Parent = frame
+
+local codeBoxCorner = Instance.new("UICorner")
+codeBoxCorner.CornerRadius = UDim.new(0, 6)
+codeBoxCorner.Parent = codeBox
+
+local codeBoxStroke = Instance.new("UIStroke")
+codeBoxStroke.Color = Color3.fromRGB(40, 40, 52)
+codeBoxStroke.Thickness = 1
+codeBoxStroke.Parent = codeBox
+
+codeBox.FocusLost:Connect(function()
+&#9;plugin:SetSetting("FTR_BridgeCode", codeBox.Text)
+end)
+
+-- Divider between the input fields and the action buttons
+local divider = Instance.new("Frame")
+divider.Size = UDim2.new(1, 0, 0, 1)
+divider.BackgroundColor3 = Color3.fromRGB(40, 40, 52)
+divider.BorderSizePixel = 0
+divider.LayoutOrder = 5
+divider.Parent = frame
+
+-- Toggle: shift pulled top-level frames so the group's top-left sits at (0,0).
+-- Figma top-level page frames keep their absolute canvas offset (often off-screen);
+-- this brings them back on-screen while preserving their relative layout.
+local recenterEnabled = (plugin:GetSetting("FTR_Recenter") ~= false)
+
+local recenterButton = Instance.new("TextButton")
+recenterButton.Size = UDim2.new(1, 0, 0, 22)
+recenterButton.TextColor3 = Color3.fromRGB(160, 160, 171)
+recenterButton.BackgroundColor3 = Color3.fromRGB(26, 26, 36)
+recenterButton.BorderSizePixel = 0
+recenterButton.Font = Enum.Font.Gotham
+recenterButton.TextSize = 14
+recenterButton.LayoutOrder = 6
+recenterButton.Parent = frame
+
+local recenterCorner = Instance.new("UICorner")
+recenterCorner.CornerRadius = UDim.new(0, 6)
+recenterCorner.Parent = recenterButton
+
+local recenterStroke = Instance.new("UIStroke")
+recenterStroke.Color = Color3.fromRGB(40, 40, 52)
+recenterStroke.Thickness = 1
+recenterStroke.Parent = recenterButton
+
+local function refreshRecenterText()
+&#9;recenterButton.Text = "Recenter roots: " .. (recenterEnabled and "On" or "Off")
+end
+refreshRecenterText()
+
+recenterButton.MouseButton1Click:Connect(function()
+&#9;recenterEnabled = not recenterEnabled
+&#9;plugin:SetSetting("FTR_Recenter", recenterEnabled)
+&#9;refreshRecenterText()
+end)
+
+recenterButton.MouseEnter:Connect(function()
+&#9;recenterButton.BackgroundColor3 = Color3.fromRGB(34, 34, 46)
+&#9;recenterButton.TextColor3 = Color3.fromRGB(232, 232, 236)
+end)
+recenterButton.MouseLeave:Connect(function()
+&#9;recenterButton.BackgroundColor3 = Color3.fromRGB(26, 26, 36)
+&#9;recenterButton.TextColor3 = Color3.fromRGB(160, 160, 171)
+end)
+
+local pullDockButton = Instance.new("TextButton")
+pullDockButton.Size = UDim2.new(1, 0, 0, 28)
+pullDockButton.Text = "Pull from Figma"
+pullDockButton.TextColor3 = Color3.fromRGB(10, 10, 15)
+pullDockButton.BackgroundColor3 = Color3.fromRGB(245, 158, 11)
+pullDockButton.BorderSizePixel = 0
+pullDockButton.Font = Enum.Font.GothamBold
+pullDockButton.TextSize = 16
+pullDockButton.LayoutOrder = 7
+pullDockButton.Parent = frame
+
+local pullDockCorner = Instance.new("UICorner")
+pullDockCorner.CornerRadius = UDim.new(0, 6)
+pullDockCorner.Parent = pullDockButton
+
+pullDockButton.MouseEnter:Connect(function()
+&#9;pullDockButton.BackgroundColor3 = Color3.fromRGB(251, 176, 52)
+end)
+pullDockButton.MouseLeave:Connect(function()
+&#9;pullDockButton.BackgroundColor3 = Color3.fromRGB(245, 158, 11)
+end)
+
+-- Fix Images button (secondary style, matches recenterButton)
+local fixDockButton = Instance.new("TextButton")
+fixDockButton.Size = UDim2.new(1, 0, 0, 22)
+fixDockButton.Text = "Fix Images"
+fixDockButton.TextColor3 = Color3.fromRGB(160, 160, 171)
+fixDockButton.BackgroundColor3 = Color3.fromRGB(26, 26, 36)
+fixDockButton.BorderSizePixel = 0
+fixDockButton.Font = Enum.Font.Gotham
+fixDockButton.TextSize = 14
+fixDockButton.LayoutOrder = 8
+fixDockButton.Parent = frame
+
+local fixDockCorner = Instance.new("UICorner")
+fixDockCorner.CornerRadius = UDim.new(0, 6)
+fixDockCorner.Parent = fixDockButton
+
+local fixDockStroke = Instance.new("UIStroke")
+fixDockStroke.Color = Color3.fromRGB(40, 40, 52)
+fixDockStroke.Thickness = 1
+fixDockStroke.Parent = fixDockButton
+
+fixDockButton.MouseEnter:Connect(function()
+&#9;fixDockButton.BackgroundColor3 = Color3.fromRGB(34, 34, 46)
+&#9;fixDockButton.TextColor3 = Color3.fromRGB(232, 232, 236)
+end)
+fixDockButton.MouseLeave:Connect(function()
+&#9;fixDockButton.BackgroundColor3 = Color3.fromRGB(26, 26, 36)
+&#9;fixDockButton.TextColor3 = Color3.fromRGB(160, 160, 171)
+end)
+
+--------------------------------------------------------------------------------
+-- Progress UI (status text + bar) — shown during Pull / Fix
+--------------------------------------------------------------------------------
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(1, 0, 0, 14)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = ""
+statusLabel.TextColor3 = Color3.fromRGB(160, 160, 171)
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 12
+statusLabel.LayoutOrder = 9
+statusLabel.Visible = false
+statusLabel.Parent = frame
+
+local progressBar = Instance.new("Frame")
+progressBar.Size = UDim2.new(1, 0, 0, 5)
+progressBar.BackgroundColor3 = Color3.fromRGB(26, 26, 36)
+progressBar.BorderSizePixel = 0
+progressBar.LayoutOrder = 10
+progressBar.Visible = false
+progressBar.Parent = frame
+
+local progressBarCorner = Instance.new("UICorner")
+progressBarCorner.CornerRadius = UDim.new(1, 0)
+progressBarCorner.Parent = progressBar
+
+local progressFill = Instance.new("Frame")
+progressFill.Size = UDim2.fromScale(0, 1)
+progressFill.BackgroundColor3 = Color3.fromRGB(245, 158, 11)
+progressFill.BorderSizePixel = 0
+progressFill.Parent = progressBar
+
+local progressFillCorner = Instance.new("UICorner")
+progressFillCorner.CornerRadius = UDim.new(1, 0)
+progressFillCorner.Parent = progressFill
+
+-- Update the status line + bar. `fraction` in [0,1] or nil for indeterminate (full bar).
+-- We yield a frame so Studio actually repaints between the (blocking) image resolves.
+local function setStatus(text, fraction, colour)
+&#9;statusLabel.Visible = true
+&#9;progressBar.Visible = true
+&#9;statusLabel.Text = text
+&#9;progressFill.BackgroundColor3 = colour or Color3.fromRGB(245, 158, 11)
+&#9;progressFill.Size = UDim2.fromScale(fraction == nil and 1 or math.clamp(fraction, 0, 1), 1)
+&#9;task.wait()
+end
+
+local function hideStatus(finalText, colour)
+&#9;if finalText then
+&#9;&#9;statusLabel.Text = finalText
+&#9;&#9;statusLabel.TextColor3 = colour or Color3.fromRGB(160, 160, 171)
+&#9;&#9;progressFill.Size = UDim2.fromScale(1, 1)
+&#9;&#9;progressFill.BackgroundColor3 = colour or Color3.fromRGB(52, 211, 153)
+&#9;&#9;task.delay(4, function()
+&#9;&#9;&#9;statusLabel.Visible = false
+&#9;&#9;&#9;progressBar.Visible = false
+&#9;&#9;&#9;statusLabel.TextColor3 = Color3.fromRGB(160, 160, 171)
+&#9;&#9;end)
+&#9;else
+&#9;&#9;statusLabel.Visible = false
+&#9;&#9;progressBar.Visible = false
+&#9;end
+end
+
+--------------------------------------------------------------------------------
+-- XML parser (generic -&gt; tree of { tag, attrs, children })
+--------------------------------------------------------------------------------
+
+local function decodeEntities(s)
+&#9;if not s or s == "" then return s end
+&#9;s = s:gsub("&amp;#(%d+);", function(n) return utf8.char(tonumber(n)) end)
+&#9;s = s:gsub("&amp;lt;", "&lt;"):gsub("&amp;gt;", "&gt;"):gsub("&amp;quot;", "\""):gsub("&amp;apos;", "'")
+&#9;s = s:gsub("&amp;amp;", "&amp;")
+&#9;return s
+end
+
+-- Returns a list of top-level nodes. Each node: { tag, attrs = {}, children = {}, text }
+-- Text-only content is stored on node.text; element children are in node.children.
+local function parseXML(xml)
+&#9;local pos = 1
+&#9;local len = #xml
+
+&#9;local function parseNodes(stopTag)
+&#9;&#9;local nodes = {}
+
+&#9;&#9;while pos &lt;= len do
+&#9;&#9;&#9;local lt = xml:find("&lt;", pos, true)
+&#9;&#9;&#9;if not lt then break end
+
+&#9;&#9;&#9;-- text between elements
+&#9;&#9;&#9;if lt &gt; pos then
+&#9;&#9;&#9;&#9;local text = xml:sub(pos, lt - 1)
+&#9;&#9;&#9;&#9;if text:match("%S") then
+&#9;&#9;&#9;&#9;&#9;nodes._text = (nodes._text or "") .. decodeEntities(text)
+&#9;&#9;&#9;&#9;end
+&#9;&#9;&#9;end
+&#9;&#9;&#9;pos = lt
+
+&#9;&#9;&#9;-- comments
+&#9;&#9;&#9;if xml:sub(pos, pos + 3) == "&lt;!--" then
+&#9;&#9;&#9;&#9;local fin = xml:find("--&gt;", pos, true)
+&#9;&#9;&#9;&#9;pos = (fin and fin + 3) or (len + 1)
+&#9;&#9;&#9;-- CDATA
+&#9;&#9;&#9;elseif xml:sub(pos, pos + 8) == "&lt;![CDATA[" then
+&#9;&#9;&#9;&#9;local fin = xml:find("]]&gt;", pos, true)
+&#9;&#9;&#9;&#9;local data = xml:sub(pos + 9, (fin or len) - 1)
+&#9;&#9;&#9;&#9;nodes._text = (nodes._text or "") .. data
+&#9;&#9;&#9;&#9;pos = (fin and fin + 3) or (len + 1)
+&#9;&#9;&#9;-- closing tag
+&#9;&#9;&#9;elseif xml:sub(pos, pos + 1) == "&lt;/" then
+&#9;&#9;&#9;&#9;local fin = xml:find("&gt;", pos, true)
+&#9;&#9;&#9;&#9;local name = xml:sub(pos + 2, (fin or len) - 1):match("^%s*(.-)%s*$")
+&#9;&#9;&#9;&#9;pos = (fin and fin + 1) or (len + 1)
+&#9;&#9;&#9;&#9;if stopTag and name == stopTag then
+&#9;&#9;&#9;&#9;&#9;return nodes
+&#9;&#9;&#9;&#9;end
+&#9;&#9;&#9;&#9;-- mismatched close; ignore and continue
+&#9;&#9;&#9;-- declaration / processing instruction
+&#9;&#9;&#9;elseif xml:sub(pos, pos + 1) == "&lt;?" then
+&#9;&#9;&#9;&#9;local fin = xml:find("?&gt;", pos, true)
+&#9;&#9;&#9;&#9;pos = (fin and fin + 2) or (len + 1)
+&#9;&#9;&#9;-- opening tag
+&#9;&#9;&#9;else
+&#9;&#9;&#9;&#9;local fin = xml:find("&gt;", pos, true)
+&#9;&#9;&#9;&#9;if not fin then break end
+&#9;&#9;&#9;&#9;local raw = xml:sub(pos + 1, fin - 1)
+&#9;&#9;&#9;&#9;local selfClosing = raw:sub(-1) == "/"
+&#9;&#9;&#9;&#9;if selfClosing then raw = raw:sub(1, -2) end
+
+&#9;&#9;&#9;&#9;local tag = raw:match("^([%w_:%-]+)")
+&#9;&#9;&#9;&#9;local node = { tag = tag, attrs = {}, children = {} }
+&#9;&#9;&#9;&#9;for k, v in raw:gmatch("([%w_:%-]+)%s*=%s*\"([^\"]*)\"") do
+&#9;&#9;&#9;&#9;&#9;node.attrs[k] = decodeEntities(v)
+&#9;&#9;&#9;&#9;end
+
+&#9;&#9;&#9;&#9;pos = fin + 1
+
+&#9;&#9;&#9;&#9;if not selfClosing then
+&#9;&#9;&#9;&#9;&#9;local inner = parseNodes(tag)
+&#9;&#9;&#9;&#9;&#9;node.text = inner._text
+&#9;&#9;&#9;&#9;&#9;inner._text = nil
+&#9;&#9;&#9;&#9;&#9;node.children = inner
+&#9;&#9;&#9;&#9;end
+
+&#9;&#9;&#9;&#9;table.insert(nodes, node)
+&#9;&#9;&#9;end
+&#9;&#9;end
+
+&#9;&#9;return nodes
+&#9;end
+
+&#9;return parseNodes(nil)
+end
+
+--------------------------------------------------------------------------------
+-- Property element -&gt; Luau value
+--------------------------------------------------------------------------------
+
+local function childTagText(node, tag)
+&#9;for _, c in ipairs(node.children) do
+&#9;&#9;if c.tag == tag then return c.text end
+&#9;end
+&#9;return nil
+end
+
+local function num(s) return tonumber(s) or 0 end
+
+-- Pull all whitespace-separated numbers out of a node's text (for sequences).
+local function numbers(text)
+&#9;local out = {}
+&#9;for n in tostring(text or ""):gmatch("[-%d%.eE+]+") do
+&#9;&#9;out[#out + 1] = tonumber(n)
+&#9;end
+&#9;return out
+end
+
+local function clamp01(value)
+&#9;value = tonumber(value) or 0
+&#9;if value &lt; 0 then return 0 end
+&#9;if value &gt; 1 then return 1 end
+&#9;return value
+end
+
+local function normaliseColorKeypoints(keypoints)
+&#9;if #keypoints == 0 then return keypoints end
+
+&#9;table.sort(keypoints, function(a, b)
+&#9;&#9;return a.Time &lt; b.Time
+&#9;end)
+
+&#9;if keypoints[1].Time ~= 0 then
+&#9;&#9;table.insert(keypoints, 1, ColorSequenceKeypoint.new(0, keypoints[1].Value))
+&#9;end
+
+&#9;local last = keypoints[#keypoints]
+&#9;if last.Time ~= 1 then
+&#9;&#9;keypoints[#keypoints + 1] = ColorSequenceKeypoint.new(1, last.Value)
+&#9;end
+
+&#9;return keypoints
+end
+
+local function normaliseNumberKeypoints(keypoints)
+&#9;if #keypoints == 0 then return keypoints end
+
+&#9;table.sort(keypoints, function(a, b)
+&#9;&#9;return a.Time &lt; b.Time
+&#9;end)
+
+&#9;if keypoints[1].Time ~= 0 then
+&#9;&#9;table.insert(keypoints, 1, NumberSequenceKeypoint.new(0, keypoints[1].Value))
+&#9;end
+
+&#9;local last = keypoints[#keypoints]
+&#9;if last.Time ~= 1 then
+&#9;&#9;keypoints[#keypoints + 1] = NumberSequenceKeypoint.new(1, last.Value)
+&#9;end
+
+&#9;return keypoints
+end
+
+local function readValue(node)
+&#9;local tag = node.tag
+
+&#9;if tag == "string" or tag == "ProtectedString" or tag == "BinaryString" then
+&#9;&#9;return node.text or ""
+&#9;elseif tag == "int" or tag == "int64" then
+&#9;&#9;return math.floor(num(node.text))
+&#9;elseif tag == "float" or tag == "double" then
+&#9;&#9;return num(node.text)
+&#9;elseif tag == "token" then
+&#9;&#9;return math.floor(num(node.text)) -- enum properties accept their integer value
+&#9;elseif tag == "bool" then
+&#9;&#9;return (node.text == "true")
+&#9;elseif tag == "Content" then
+&#9;&#9;return childTagText(node, "url") or ""
+&#9;elseif tag == "Vector2" then
+&#9;&#9;return Vector2.new(num(childTagText(node, "X")), num(childTagText(node, "Y")))
+&#9;elseif tag == "Vector3" then
+&#9;&#9;return Vector3.new(num(childTagText(node, "X")), num(childTagText(node, "Y")), num(childTagText(node, "Z")))
+&#9;elseif tag == "UDim2" then
+&#9;&#9;return UDim2.new(
+&#9;&#9;&#9;num(childTagText(node, "XS")), num(childTagText(node, "XO")),
+&#9;&#9;&#9;num(childTagText(node, "YS")), num(childTagText(node, "YO"))
+&#9;&#9;)
+&#9;elseif tag == "UDim" then
+&#9;&#9;return UDim.new(num(childTagText(node, "S")), num(childTagText(node, "O")))
+&#9;elseif tag == "Color3" then
+&#9;&#9;return Color3.new(num(childTagText(node, "R")), num(childTagText(node, "G")), num(childTagText(node, "B")))
+&#9;elseif tag == "Rect2D" then
+&#9;&#9;local mn, mx
+&#9;&#9;for _, c in ipairs(node.children) do
+&#9;&#9;&#9;if c.tag == "min" then mn = c elseif c.tag == "max" then mx = c end
+&#9;&#9;end
+&#9;&#9;if mn and mx then
+&#9;&#9;&#9;return Rect.new(
+&#9;&#9;&#9;&#9;num(childTagText(mn, "X")), num(childTagText(mn, "Y")),
+&#9;&#9;&#9;&#9;num(childTagText(mx, "X")), num(childTagText(mx, "Y"))
+&#9;&#9;&#9;)
+&#9;&#9;end
+&#9;elseif tag == "NumberSequence" then
+&#9;&#9;local n = numbers(node.text)
+&#9;&#9;local kp = {}
+&#9;&#9;local i = 1
+&#9;&#9;while i + 1 &lt;= #n do
+&#9;&#9;&#9;kp[#kp + 1] = NumberSequenceKeypoint.new(clamp01(n[i]), clamp01(n[i + 1]))
+&#9;&#9;&#9;i = i + 3 -- time, value, envelope
+&#9;&#9;end
+&#9;&#9;if #kp &gt;= 1 then return NumberSequence.new(normaliseNumberKeypoints(kp)) end
+&#9;elseif tag == "ColorSequence" then
+&#9;&#9;local n = numbers(node.text)
+&#9;&#9;local kp = {}
+&#9;&#9;local i = 1
+&#9;&#9;while i + 3 &lt;= #n do
+&#9;&#9;&#9;kp[#kp + 1] = ColorSequenceKeypoint.new(
+&#9;&#9;&#9;&#9;clamp01(n[i]),
+&#9;&#9;&#9;&#9;Color3.new(clamp01(n[i + 1]), clamp01(n[i + 2]), clamp01(n[i + 3]))
+&#9;&#9;&#9;)
+&#9;&#9;&#9;i = i + 5 -- time, r, g, b, envelope
+&#9;&#9;end
+&#9;&#9;if #kp &gt;= 1 then return ColorSequence.new(normaliseColorKeypoints(kp)) end
+&#9;elseif tag == "Font" then
+&#9;&#9;-- The exporter serialises &lt;Family&gt;&lt;url&gt;rbxasset://…&lt;/url&gt;&lt;/Family&gt;, so the family lives in
+&#9;&#9;-- a nested &lt;url&gt; element, not as Family's direct text. Reading it as text (the old code)
+&#9;&#9;-- always failed, so EVERY imported text silently fell back to LegacyArial.
+&#9;&#9;local familyNode
+&#9;&#9;for _, c in ipairs(node.children) do
+&#9;&#9;&#9;if c.tag == "Family" then familyNode = c break end
+&#9;&#9;end
+&#9;&#9;local family = familyNode and (childTagText(familyNode, "url") or familyNode.text) or nil
+
+&#9;&#9;if family and family:match("rbxasset") then
+&#9;&#9;&#9;-- Weight is written as a number (e.g. 700); map it to the closest Enum.FontWeight so
+&#9;&#9;&#9;-- variable-font weights (e.g. 450) still land on the nearest supported step instead of
+&#9;&#9;&#9;-- silently reverting to Regular.
+&#9;&#9;&#9;local weightNum = tonumber(childTagText(node, "Weight")) or 400
+&#9;&#9;&#9;local weightEnum = Enum.FontWeight.Regular
+&#9;&#9;&#9;local bestDelta = math.huge
+&#9;&#9;&#9;for _, w in ipairs(Enum.FontWeight:GetEnumItems()) do
+&#9;&#9;&#9;&#9;local delta = math.abs(w.Value - weightNum)
+&#9;&#9;&#9;&#9;if delta &lt; bestDelta then bestDelta = delta weightEnum = w end
+&#9;&#9;&#9;end
+&#9;&#9;&#9;local styleEnum = (childTagText(node, "Style") == "Italic")
+&#9;&#9;&#9;&#9;and Enum.FontStyle.Italic or Enum.FontStyle.Normal
+
+&#9;&#9;&#9;local ok, font = pcall(function() return Font.new(family, weightEnum, styleEnum) end)
+&#9;&#9;&#9;if ok and font then return font end
+&#9;&#9;end
+&#9;end
+
+&#9;return nil -- unknown / unsupported property type; skip it
+end
+
+--------------------------------------------------------------------------------
+-- Build instances from the parsed tree
+--------------------------------------------------------------------------------
+
+-- Some property names from the rbxmx don't map 1:1 to assignable Lua properties.
+local SKIP_PROPS = {
+&#9;-- (none currently; placeholder for future quirks)
+}
+
+local function buildItem(itemNode)
+&#9;local class = itemNode.attrs.class
+&#9;if not class then return nil end
+
+&#9;local ok, instance = pcall(Instance.new, class)
+&#9;if not ok or not instance then
+&#9;&#9;warn("[Figma to Roblox] Unknown class '" .. tostring(class) .. "', skipping")
+&#9;&#9;return nil
+&#9;end
+
+&#9;for _, child in ipairs(itemNode.children) do
+&#9;&#9;if child.tag == "Properties" then
+&#9;&#9;&#9;for _, prop in ipairs(child.children) do
+&#9;&#9;&#9;&#9;local name = prop.attrs.name
+&#9;&#9;&#9;&#9;if name and not SKIP_PROPS[name] then
+&#9;&#9;&#9;&#9;&#9;local value = readValue(prop)
+&#9;&#9;&#9;&#9;&#9;if value ~= nil then
+&#9;&#9;&#9;&#9;&#9;&#9;pcall(function() instance[name] = value end)
+&#9;&#9;&#9;&#9;&#9;end
+&#9;&#9;&#9;&#9;end
+&#9;&#9;&#9;end
+&#9;&#9;elseif child.tag == "Item" then
+&#9;&#9;&#9;local sub = buildItem(child)
+&#9;&#9;&#9;if sub then sub.Parent = instance end
+&#9;&#9;end
+&#9;end
+
+&#9;return instance
+end
+
+--------------------------------------------------------------------------------
+-- Image fix (Decal -&gt; Texture, ImageColor3 0-255 -&gt; 0-1)
+--------------------------------------------------------------------------------
+
+local function extractId(content)
+&#9;if typeof(content) == "Instance" then return nil end
+&#9;local str = tostring(content)
+&#9;return tonumber(str:match("%d+"))
+end
+
+local resolveCache = {}
+
+local function resolveTexture(decalId)
+&#9;if resolveCache[decalId] ~= nil then return resolveCache[decalId] end
+
+&#9;local ok, model = pcall(function() return InsertService:LoadAsset(decalId) end)
+&#9;if not ok or not model then
+&#9;&#9;resolveCache[decalId] = false
+&#9;&#9;return false
+&#9;end
+
+&#9;local texture = false
+&#9;for _, d in ipairs(model:GetDescendants()) do
+&#9;&#9;if d:IsA("Decal") and d.Texture and d.Texture ~= "" then
+&#9;&#9;&#9;texture = extractId(d.Texture)
+&#9;&#9;&#9;break
+&#9;&#9;end
+&#9;end
+&#9;model:Destroy()
+
+&#9;resolveCache[decalId] = texture or false
+&#9;return resolveCache[decalId]
+end
+
+local function imagePropFor(instance)
+&#9;if instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
+&#9;&#9;return "Image"
+&#9;elseif instance:IsA("Decal") or instance:IsA("Texture") then
+&#9;&#9;return "Texture"
+&#9;end
+&#9;return nil
+end
+
+local function processInstance(instance, counters)
+&#9;local prop = imagePropFor(instance)
+&#9;if prop then
+&#9;&#9;local id = extractId(instance[prop])
+&#9;&#9;if id then
+&#9;&#9;&#9;local texture = resolveTexture(id)
+&#9;&#9;&#9;if texture then
+&#9;&#9;&#9;&#9;instance[prop] = "rbxassetid://" .. texture
+&#9;&#9;&#9;&#9;counters.converted += 1
+&#9;&#9;&#9;else
+&#9;&#9;&#9;&#9;counters.skipped += 1
+&#9;&#9;&#9;end
+&#9;&#9;end
+&#9;end
+
+&#9;if instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
+&#9;&#9;local c = instance.ImageColor3
+&#9;&#9;if c.R &gt; 1 or c.G &gt; 1 or c.B &gt; 1 then
+&#9;&#9;&#9;instance.ImageColor3 = Color3.new(
+&#9;&#9;&#9;&#9;math.clamp(c.R / 255, 0, 1),
+&#9;&#9;&#9;&#9;math.clamp(c.G / 255, 0, 1),
+&#9;&#9;&#9;&#9;math.clamp(c.B / 255, 0, 1)
+&#9;&#9;&#9;)
+&#9;&#9;&#9;counters.colourFixed += 1
+&#9;&#9;end
+&#9;end
+end
+
+-- The exporter ships a "FTR_StrokeScaler" LocalScript with any UI that uses UIStroke:
+-- Thickness is the one GUI property with no Scale component, so it must be rescaled to
+-- the UI's real size. LocalScripts only run in play mode, so at import we apply the same
+-- logic here (and keep it live while Studio is open) — otherwise the edit-mode / device
+-- emulator preview shows design-px outlines that look too thick or too thin.
+local function applyStrokeScaling(root)
+&#9;local scaler, heightValue
+&#9;for _, d in ipairs(root:GetDescendants()) do
+&#9;&#9;if d:IsA("LocalScript") and d.Name == "FTR_StrokeScaler" then
+&#9;&#9;&#9;scaler = d
+&#9;&#9;elseif d:IsA("NumberValue") and d.Name == "FTR_DesignHeight" then
+&#9;&#9;&#9;heightValue = d
+&#9;&#9;end
+&#9;end
+&#9;if not scaler then return end
+
+&#9;-- Prefer the NumberValue: reading scaler.Source needs the Script Injection permission
+&#9;-- and silently fails without it. The Source regex stays as a fallback for old exports.
+&#9;local designHeight = heightValue and heightValue.Value or nil
+&#9;if not designHeight then
+&#9;&#9;local ok, src = pcall(function() return scaler.Source end)
+&#9;&#9;if ok then designHeight = tonumber(src:match("DESIGN_HEIGHT%s*=%s*([%d%.]+)")) end
+&#9;end
+&#9;if not designHeight or designHeight &lt;= 0 then return end
+
+&#9;local guiRoot = scaler.Parent
+&#9;if not (guiRoot and guiRoot:IsA("GuiObject")) then return end
+
+&#9;local function apply()
+&#9;&#9;local factor = guiRoot.AbsoluteSize.Y / designHeight
+&#9;&#9;if factor &lt;= 0 then return end
+&#9;&#9;for _, s in ipairs(guiRoot:GetDescendants()) do
+&#9;&#9;&#9;if s:IsA("UIStroke") then
+&#9;&#9;&#9;&#9;-- Same attribute the runtime script uses, so both stay idempotent.
+&#9;&#9;&#9;&#9;local design = s:GetAttribute("FTR_DesignThickness")
+&#9;&#9;&#9;&#9;if not design then
+&#9;&#9;&#9;&#9;&#9;design = s.Thickness
+&#9;&#9;&#9;&#9;&#9;s:SetAttribute("FTR_DesignThickness", design)
+&#9;&#9;&#9;&#9;end
+&#9;&#9;&#9;&#9;s.Thickness = design * factor
+&#9;&#9;&#9;end
+&#9;&#9;end
+&#9;end
+
+&#9;guiRoot:GetPropertyChangedSignal("AbsoluteSize"):Connect(apply)
+&#9;apply()
+end
+
+-- Shift a group of root GuiObjects so the top-left of their combined bounding box
+-- sits at (0, 0). Relative layout between roots is preserved; only the shared
+-- absolute offset (the Figma canvas position) is removed so nothing lands off-screen.
+local function recenterRoots(roots)
+&#9;local minX, minY = math.huge, math.huge
+&#9;for _, r in ipairs(roots) do
+&#9;&#9;if r:IsA("GuiObject") then
+&#9;&#9;&#9;minX = math.min(minX, r.Position.X.Offset)
+&#9;&#9;&#9;minY = math.min(minY, r.Position.Y.Offset)
+&#9;&#9;end
+&#9;end
+&#9;if minX == math.huge then return end
+
+&#9;for _, r in ipairs(roots) do
+&#9;&#9;if r:IsA("GuiObject") then
+&#9;&#9;&#9;local p = r.Position
+&#9;&#9;&#9;r.Position = UDim2.new(p.X.Scale, p.X.Offset - minX, p.Y.Scale, p.Y.Offset - minY)
+&#9;&#9;end
+&#9;end
+end
+
+-- Runs the fix over a set of root instances (their descendants included).
+-- onProgress(done, total) is called after each image instance is resolved so the UI can update.
+local function fixRoots(roots, onProgress)
+&#9;local counters = { converted = 0, colourFixed = 0, skipped = 0 }
+
+&#9;-- Flatten everything so we can measure how many image instances there are (for the bar).
+&#9;local all = {}
+&#9;for _, root in ipairs(roots) do
+&#9;&#9;all[#all + 1] = root
+&#9;&#9;for _, d in ipairs(root:GetDescendants()) do all[#all + 1] = d end
+&#9;end
+
+&#9;local total = 0
+&#9;for _, inst in ipairs(all) do
+&#9;&#9;local prop = imagePropFor(inst)
+&#9;&#9;if prop and extractId(inst[prop]) then total += 1 end
+&#9;end
+
+&#9;local done = 0
+&#9;for _, inst in ipairs(all) do
+&#9;&#9;local prop = imagePropFor(inst)
+&#9;&#9;local hasImage = prop and extractId(inst[prop]) ~= nil
+&#9;&#9;processInstance(inst, counters)
+&#9;&#9;if hasImage then
+&#9;&#9;&#9;done += 1
+&#9;&#9;&#9;if onProgress then onProgress(done, total) end
+&#9;&#9;end
+&#9;end
+&#9;return counters
+end
+
+--------------------------------------------------------------------------------
+-- Actions
+--------------------------------------------------------------------------------
+
+local function fixSelectionOrStarterGui()
+&#9;local roots = Selection:Get()
+&#9;if #roots == 0 then roots = { StarterGui } end
+
+&#9;setStatus("Fixing images…", nil)
+&#9;local recording = ChangeHistoryService:TryBeginRecording("FigmaToRoblox_FixImages")
+&#9;local counters = fixRoots(roots, function(done, total)
+&#9;&#9;setStatus(string.format("Loading images %d/%d…", done, total), total &gt; 0 and (done / total) or 1)
+&#9;end)
+
+&#9;-- Also rescale UIStroke thickness — lets "Fix Images" double as a manual
+&#9;-- re-apply after changing the device emulator resolution.
+&#9;for _, r in ipairs(roots) do
+&#9;&#9;if r == StarterGui then
+&#9;&#9;&#9;for _, sg in ipairs(StarterGui:GetChildren()) do
+&#9;&#9;&#9;&#9;for _, c in ipairs(sg:GetChildren()) do pcall(applyStrokeScaling, c) end
+&#9;&#9;&#9;end
+&#9;&#9;else
+&#9;&#9;&#9;pcall(applyStrokeScaling, r)
+&#9;&#9;end
+&#9;end
+
+&#9;if recording then
+&#9;&#9;ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Commit)
+&#9;end
+
+&#9;hideStatus(string.format("✓ Fixed %d image(s)", counters.converted))
+
+&#9;print(string.format(
+&#9;&#9;"[Figma to Roblox] Fixed images: %d Decal-&gt;Texture, %d colour(s), %d skipped.",
+&#9;&#9;counters.converted, counters.colourFixed, counters.skipped
+&#9;))
+end
+
+local function pullFromFigma()
+&#9;local base = workerBox.Text:gsub("%s+", ""):gsub("/+$", "")
+&#9;if base == "" then
+&#9;&#9;warn("[Figma to Roblox] Set your Worker URL first (deploy your own Cloudflare Worker).")
+&#9;&#9;return
+&#9;end
+&#9;if not base:match("^https?://") then base = "https://" .. base end
+
+&#9;local code = codeBox.Text:gsub("%s+", "")
+&#9;if code == "" then
+&#9;&#9;warn("[Figma to Roblox] Enter a Session Code first (must match the Figma plugin).")
+&#9;&#9;return
+&#9;end
+
+&#9;setStatus("Fetching from Figma…", nil)
+
+&#9;local ok, body = pcall(function()
+&#9;&#9;return HttpService:GetAsync(base .. "/bridge/" .. HttpService:UrlEncode(code))
+&#9;end)
+
+&#9;if not ok then
+&#9;&#9;hideStatus()
+&#9;&#9;local msg = tostring(body)
+&#9;&#9;if msg:match("404") then
+&#9;&#9;&#9;warn("[Figma to Roblox] Nothing waiting for code '" .. code .. "'. Export from Figma first (with Send to Studio enabled).")
+&#9;&#9;elseif msg:match("Http requests are not enabled") or msg:match("HttpEnabled") then
+&#9;&#9;&#9;warn("[Figma to Roblox] Enable HTTP: Game Settings -&gt; Security -&gt; Allow HTTP Requests.")
+&#9;&#9;else
+&#9;&#9;&#9;warn("[Figma to Roblox] Pull failed: " .. msg)
+&#9;&#9;end
+&#9;&#9;return
+&#9;end
+
+&#9;setStatus("Building instances…", nil)
+&#9;local tree = parseXML(body)
+
+&#9;-- Find the &lt;roblox&gt; root, then its top-level &lt;Item&gt; children.
+&#9;local robloxNode
+&#9;for _, n in ipairs(tree) do
+&#9;&#9;if n.tag == "roblox" then robloxNode = n break end
+&#9;end
+&#9;if not robloxNode then
+&#9;&#9;hideStatus()
+&#9;&#9;warn("[Figma to Roblox] Pulled data was not a valid Roblox export.")
+&#9;&#9;return
+&#9;end
+
+&#9;local parent = Selection:Get()[1] or StarterGui
+
+&#9;local recording = ChangeHistoryService:TryBeginRecording("FigmaToRoblox_Pull")
+&#9;local created = {}
+&#9;for _, n in ipairs(robloxNode.children) do
+&#9;&#9;if n.tag == "Item" then
+&#9;&#9;&#9;local instance = buildItem(n)
+&#9;&#9;&#9;if instance then
+&#9;&#9;&#9;&#9;instance.Parent = parent
+&#9;&#9;&#9;&#9;created[#created + 1] = instance
+&#9;&#9;&#9;end
+&#9;&#9;end
+&#9;end
+
+&#9;-- Bring off-screen top-level frames back into view (preserves relative layout).
+&#9;if recenterEnabled then
+&#9;&#9;recenterRoots(created)
+&#9;end
+
+&#9;-- Resolve images on what we just built (the slow part — report progress per image).
+&#9;local counters = fixRoots(created, function(done, total)
+&#9;&#9;setStatus(string.format("Loading images %d/%d…", done, total), total &gt; 0 and (done / total) or 1)
+&#9;end)
+
+&#9;-- Scale UIStroke thickness to the current viewport (edit-mode stand-in for FTR_StrokeScaler).
+&#9;for _, r in ipairs(created) do
+&#9;&#9;pcall(applyStrokeScaling, r)
+&#9;end
+
+&#9;if recording then
+&#9;&#9;ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Commit)
+&#9;end
+
+&#9;if #created &gt; 0 then
+&#9;&#9;Selection:Set(created)
+&#9;end
+
+&#9;hideStatus(string.format("✓ Pulled %d root(s) · %d images", #created, counters.converted))
+
+&#9;print(string.format(
+&#9;&#9;"[Figma to Roblox] Pulled %d root(s) into %s. Images: %d Decal-&gt;Texture, %d colour(s), %d skipped.",
+&#9;&#9;#created, parent:GetFullName(), counters.converted, counters.colourFixed, counters.skipped
+&#9;))
+end
+
+--------------------------------------------------------------------------------
+-- Wire up
+--------------------------------------------------------------------------------
+
+local function safe(fn)
+&#9;return function()
+&#9;&#9;local ok, err = pcall(fn)
+&#9;&#9;if not ok then warn("[Figma to Roblox] " .. tostring(err)) end
+&#9;end
+end
+
+mainButton.Click:Connect(function()
+&#9;mainButton:SetActive(false)
+&#9;widget.Enabled = not widget.Enabled
+end)
+
+pullDockButton.MouseButton1Click:Connect(safe(pullFromFigma))
+fixDockButton.MouseButton1Click:Connect(safe(fixSelectionOrStarterGui))
+</ProtectedString>
+			<bool name="Disabled">false</bool>
+			<Content name="LinkedSource"><null></null></Content>
+			<token name="RunContext">0</token>
+			<string name="ScriptGuid">{D0A02E3D-E6C7-4A6B-8A7C-E017AD1FE221}</string>
+			<BinaryString name="AttributesSerialize"></BinaryString>
+			<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+			<bool name="DefinesCapabilities">false</bool>
+			<string name="Name">FigXporter</string>
+			<int64 name="SourceAssetId">-1</int64>
+			<BinaryString name="Tags"></BinaryString>
+		</Properties>
+	</Item>
+</roblox>

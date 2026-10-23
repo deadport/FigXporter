@@ -1,4 +1,4 @@
-# Copia a versao mais recente do plugin para a pasta de Plugins do Roblox Studio.
+# Copia o plugin FigXporter .rbxmx para a pasta de Plugins do Roblox Studio.
 # O Studio recarrega plugins locais automaticamente quando o ficheiro muda,
 # por isso basta correr este script -> nao e preciso reiniciar o Studio/place.
 #
@@ -7,9 +7,13 @@
 
 $ErrorActionPreference = "Stop"
 
-$Source = Join-Path $PSScriptRoot "FigmaImageFixer.server.lua"
+$Source = Join-Path $PSScriptRoot "FigXporter.rbxmx"
 $PluginsDir = Join-Path $env:LOCALAPPDATA "Roblox\Plugins"
-$Dest = Join-Path $PluginsDir "FigmaImageFixer.lua"
+$Dest = Join-Path $PluginsDir "FigXporter.rbxmx"
+
+if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+    throw "Plugin package not found: $Source. Run npm run build:studio-plugin first."
+}
 
 if (-not (Test-Path $PluginsDir)) {
     New-Item -ItemType Directory -Force -Path $PluginsDir | Out-Null
@@ -17,5 +21,5 @@ if (-not (Test-Path $PluginsDir)) {
 
 Copy-Item -Path $Source -Destination $Dest -Force
 
-Write-Host "Plugin copiado para:" $Dest -ForegroundColor Green
-Write-Host "O Studio deve recarregar o plugin automaticamente (sem reiniciar)." -ForegroundColor Green
+Write-Host "FigXporter local plugin copied to:" $Dest -ForegroundColor Green
+Write-Host "Restart Roblox Studio or reload the local plugin." -ForegroundColor Green
