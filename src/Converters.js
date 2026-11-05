@@ -2111,6 +2111,44 @@ function GetNodeProperties(Node, Settings, ParentObject) {
         // in the pre-block) — don't export a second time, which would queue a duplicate
         // upload and overwrite Properties.Image with a fresh placeholder.
         if (!Properties.Image) ExportImage(Node, Properties);
+
+        // This must run AFTER ExportImage: an IMG tag without an image fill does not set
+        // _ExportAsImage until the forced-export block above. Figma's rendered PNG already
+        // contains the node's rotation, so use the absolute visual bounds and leave this
+        // ImageLabel unrotated. This applies to nested IMG nodes too: keeping the original
+        // landscape box and rotating the already-rotated portrait PNG squeezes it.
+        const BoundingBox = Node.absoluteBoundingBox;
+        if (Properties.Rotation && BoundingBox) {
+            // Position the visual-bounds center in the immediate parent's local space.
+            // Subtracting parent AABB origins only works while the parent is unrotated;
+            // use the inverse absoluteTransform so this also works inside rotated frames.
+            let CenterX = BoundingBox.x + BoundingBox.width / 2;
+            let CenterY = BoundingBox.y + BoundingBox.height / 2;
+            const ParentTransform = ParentObject && Node.parent && Node.parent.absoluteTransform;
+            if (ParentTransform) {
+                const [[A, C, E], [B, D, F]] = ParentTransform;
+                const Determinant = A * D - B * C;
+                if (Math.abs(Determinant) > 1e-8) {
+                    const CanvasX = CenterX - E;
+                    const CanvasY = CenterY - F;
+                    const LocalCenterX = (D * CanvasX - C * CanvasY) / Determinant;
+                    const LocalCenterY = (-B * CanvasX + A * CanvasY) / Determinant;
+                    CenterX = LocalCenterX;
+                    CenterY = LocalCenterY;
+                } else if (Node.parent.absoluteBoundingBox) {
+                    // Degenerate transform fallback; retain the old unrotated-parent path.
+                    CenterX -= Node.parent.absoluteBoundingBox.x;
+                    CenterY -= Node.parent.absoluteBoundingBox.y;
+                }
+            }
+
+            Properties.Position.XO = CenterX - BoundingBox.width / 2;
+            Properties.Position.YO = CenterY - BoundingBox.height / 2;
+            Properties.Size.XO = BoundingBox.width;
+            Properties.Size.YO = BoundingBox.height;
+            Properties.Rotation = 0;
+            Properties._PositionIsRelative = true;
+        }
     }
 
     return Properties;
