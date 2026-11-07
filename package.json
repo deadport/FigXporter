@@ -16,6 +16,7 @@
         "nodemon": "^3.1.9"
     },
     "devDependencies": {
-        "terser": "^5.48.0"
+        "terser": "^5.48.0",
+        "wrangler": "4.100.0"
     }
 }

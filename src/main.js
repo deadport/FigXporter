@@ -46,6 +46,7 @@ const Conversions = require('./Conversions.js');
 const { Flags, NotifyError, Notify, PushMessageQueue, Debounce } = require('./Utilities.js');
 const { GetNodeProperties, XMLTypes, Settings, WorkerBase, UpdateImage, GetImageFromOperation, IsDone, OnStart } = require('./Converters.js');
 const HighlightNodes = require("./Flags/HighlightNodes.js");
+const DiagnoseConnection = require("./ConnectionDiagnostics.js");
 
 var RunDebounce = false;
 
@@ -721,6 +722,11 @@ function CreatePreset(Preset) {
 }
 
 async function RunPlugin() { // this is technecally a codegen plugin?
+    try {
+        await SettingsReady;
+    } catch (error) {
+        return;
+    }
     if (RunDebounce) return;
     if (figma.currentPage.selection.length == 0) return NotifyError("No Nodes selected");
 
@@ -1176,6 +1182,28 @@ figma.on("selectionchange", () => {
 
 figma.ui.onmessage = async msg => {
     switch (msg.type) {
+        case "TestConnection": {
+            try {
+                await SettingsReady;
+                let base = String(msg.worker || "").trim().replace(/\/+$/, "");
+                if (!/^https?:\/\//i.test(base)) base = "https://" + base;
+                const key = String(msg.apiKey || "").replace(/[ \t\n\r]/g, "");
+                if (!key) throw new Error("Enter a Cloud API Key to test Roblox authentication.");
+                const report = await DiagnoseConnection(
+                    fetch,
+                    base,
+                    key,
+                    Settings.CloudApiKey,
+                    Settings.UploaderType,
+                    Settings.UploaderId
+                );
+                console.log("[FTR][AuthCheck]", JSON.stringify(report));
+                figma.ui.postMessage({ type: "ConnectionTestResult", report });
+            } catch (_) {
+                figma.ui.postMessage({ type: "ConnectionTestResult", error: "Unable to test authentication. Check the Worker URL and Cloud API Key fields." });
+            }
+            break;
+        }
         case "run":
             RunPlugin();
             break;
@@ -1188,6 +1216,11 @@ figma.ui.onmessage = async msg => {
             break;
         case "SetAsync":
             if (msg.value === null || msg.value === undefined) return;
+            try {
+                await SettingsReady;
+            } catch (error) {
+                return;
+            }
             if (Settings[msg.key] !== undefined) Settings[msg.key] = msg.value;
             // vv DEBUGGING vv
             else if (Flags[msg.key] !== undefined) Flags[msg.key] = msg.value;
@@ -1197,7 +1230,14 @@ figma.ui.onmessage = async msg => {
                 else HighlightNodes.stop();
             }
 
-            if (!msg.no_save) figma.clientStorage.setAsync(msg.key, msg.value);
+            if (!msg.no_save) {
+                try {
+                    await figma.clientStorage.setAsync(msg.key, msg.value);
+                } catch (error) {
+                    console.warn("[FTR] Unable to save setting:", msg.key);
+                    NotifyError("Could not save plugin settings. Keep the plugin open and try again.");
+                }
+            }
             break;
         case "CreatePreset":
             CreatePreset(msg.preset);
@@ -1296,51 +1336,38 @@ figma.clientStorage.getAsync("__uiSize").then(sz => {
     if (sz && sz.width && sz.height) figma.ui.resize(sz.width, sz.height);
 }).catch(() => {});
 
-new Promise((resolve, reject) => {
-    figma.clientStorage.keysAsync().then(Keys => {
-        var Done = 0;
-        var StoredSettings = Flags;
-
-        for (const [key, value] of Object.entries(Settings)) {
-            StoredSettings[key] = value;
+// Finish restoring settings before accepting edits or starting an export.
+// Promise.all also completes with an empty store and propagates read failures.
+const SettingsReady = (async () => {
+    const Keys = await figma.clientStorage.keysAsync();
+    const Entries = await Promise.all(Keys.map(async Key => [Key, await figma.clientStorage.getAsync(Key)]));
+    const StoredSettings = { ...Flags, ...Settings };
+    for (const [Key, Value] of Entries) {
+        if (Key === "ForceUploadImages" || Key === "ReuploadStuckImages") {
+            await figma.clientStorage.deleteAsync(Key);
+            continue;
         }
-
-        for (var i = 0; i < Keys.length; i++) {
-            const Key = Keys[i];
-
-            figma.clientStorage.getAsync(Key).then(Value => {
-                Done += 1;
-
-                if (Value !== undefined && Value !== null && Value !== "") {
-                    switch (Key) {
-                        // Migrate old settings
-                        case "UploadToGroup": // [TEMPORARY(?) - Migrated on 28/06/2025]
-                            Flags.UploaderType = Value ? "group" : "user";
-                            StoredSettings.UploaderType =  Flags.UploaderType;
-                            StoredSettings[Key] = undefined;
-                        // Delete unwanted settings (including old)
-                        case "ForceUploadImages":
-                        case "ReuploadStuckImages":
-                            figma.clientStorage.deleteAsync(Key);
-                            break;
-                        default:
-                            StoredSettings[Key] = Value;
-                            if (Settings[Key] !== undefined) Settings[Key] = Value;
-                            // vv DEBUGGING vv
-                            else if (Flags[Key] !== undefined) Flags[Key] = Value;
-                            else console.warn(`[Figma to Roblox] Unknown Settings/Flag "${Key}", value: ${Value}`)
-                            break;
-                    }
-                }
-
-                if (Done == Keys.length) {
-                    Done = null;
-                    resolve(StoredSettings);
-                }
-            })
+        if (Key === "UploadToGroup") {
+            if (!Keys.includes("UploaderType")) {
+                Settings.UploaderType = Value ? "group" : "user";
+                StoredSettings.UploaderType = Settings.UploaderType;
+            }
+            continue;
         }
-    })
-}).then((StoredSettings) => {
+        if (Value === undefined || Value === null) continue;
+        if (Object.prototype.hasOwnProperty.call(Settings, Key)) Settings[Key] = Value;
+        else if (Object.prototype.hasOwnProperty.call(Flags, Key)) Flags[Key] = Value;
+        else continue;
+        StoredSettings[Key] = Value;
+    }
+    return StoredSettings;
+})().catch(error => {
+    console.error("[FTR] Unable to restore plugin settings");
+    NotifyError("Could not load saved settings. Reopen the plugin before exporting.");
+    throw error;
+});
+
+SettingsReady.then((StoredSettings) => {
     if (Flags.ShowHighlights) {
         HighlightNodes.start();
     } else {
@@ -1359,7 +1386,7 @@ new Promise((resolve, reject) => {
     // Send initial selection tree and preview
     SendSelectionTree();
     SendSelectionPreview();
-});
+}).catch(() => {}); // The loader already reported the storage failure.
 
 switch (figma.command) {
     case "export":

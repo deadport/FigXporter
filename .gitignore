@@ -9,3 +9,9 @@ TODO.md
 AGENTS.md
 CLAUDE.md
 snapshot.md
+
+# Per-user Cloudflare deployment and local credentials
+proxy/wrangler.local.jsonc
+.wrangler/
+.dev.vars*
+.env*
