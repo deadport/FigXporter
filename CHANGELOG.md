@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-08 — Upload authentication troubleshooting
+
+- The connection test identifies Roblox IP restrictions and verifies that the Worker received the same API key as the exporter without exposing the credential.
+- Help now includes the Cloudflare Workers IPv6 allowlist steps for uploads rejected with an IP restriction or `401 Invalid API Key`.
+- The Force Reupload Images checkbox immediately updates the exporter.
+- The example Worker configuration uses a placeholder for the user's own bridge namespace ID.
+
 ## v2.1.0 — Pixel-Perfect Update
 
 This update is a big push toward exports that match your Figma design pixel-for-pixel, plus some quality-of-life additions to the plugin panel.

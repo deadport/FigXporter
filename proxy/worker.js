@@ -21,6 +21,12 @@ const FORWARD_REQUEST_HEADERS = ["x-api-key", "content-type"];
 
 // Bridge: how long a stored export survives if Studio never picks it up (seconds).
 const BRIDGE_TTL_SECONDS = 3600;
+const WORKER_VERSION = "2026-11-08-auth-diagnostics";
+
+async function KeyFingerprint(Key) {
+    const Digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(Key));
+    return Array.from(new Uint8Array(Digest), Byte => Byte.toString(16).padStart(2, "0")).join("");
+}
 
 function CorsHeaders() {
     return {
@@ -120,12 +126,12 @@ async function InspectRobloxKey(request) {
         (Array.isArray(Data.errors) && Data.errors[0] && Data.errors[0].message) || "").toLowerCase();
     let rejectionReason = null;
     if (!RobloxResponse.ok) {
-        const ExplicitIpBlock = /(?:\bip\b|internet protocol).{0,60}(?:restrict|allow|whitelist|block|deny|unauthori[sz]ed|not allowed)|(?:restrict|allowlist|whitelist|block|deny).{0,60}(?:\bip\b|address)|requester.{0,30}address/i.test(RobloxMessage);
+        const ExplicitIpBlock = /may not be used from this ip address|(?:\bip\b|internet protocol).{0,60}(?:restrict|allow|whitelist|block|deny|unauthori[sz]ed|not allowed)|(?:restrict|allowlist|whitelist|block|deny).{0,60}(?:\bip\b|address)|requester.{0,30}address/i.test(RobloxMessage);
         if (ExplicitIpBlock) rejectionReason = "ip_restricted";
         else if (/expir/.test(RobloxMessage)) rejectionReason = "expired";
         else if (/disabled|inactive/.test(RobloxMessage)) rejectionReason = "disabled";
         else if (/moderated/.test(RobloxMessage)) rejectionReason = "moderated";
-        else if (RobloxResponse.status === 401) rejectionReason = "invalid_key";
+        else if (RobloxResponse.status === 401) rejectionReason = "auth_rejected";
         else rejectionReason = "rejected";
     }
 
@@ -151,6 +157,10 @@ async function InspectRobloxKey(request) {
         status: RobloxResponse.status,
         valid: RobloxResponse.ok,
         rejectionReason,
+        keyFingerprint: await KeyFingerprint(ApiKey),
+        upstreamMessage: RobloxResponse.ok ? null : RobloxMessage.split(ApiKey.toLowerCase()).join("[redacted]").slice(0, 300),
+        workerVersion: WORKER_VERSION,
+        workerRegion: request.cf && request.cf.colo || null,
         enabled: typeof Data.enabled === "boolean" ? Data.enabled : null,
         expired: typeof Data.expired === "boolean" ? Data.expired : null,
         assetRead: HasOperation("read"),
@@ -171,7 +181,7 @@ export default {
 
         // Health check — used by the plugin's "Test worker" button.
         if (Incoming.pathname === "/ping") {
-            return JsonResponse({ ok: true, service: "figxporter", version: "2026-11-06", bridge: !!env.BRIDGE }, 200);
+            return JsonResponse({ ok: true, service: "figxporter", version: WORKER_VERSION, bridge: !!env.BRIDGE }, 200);
         }
 
         if (Incoming.pathname === "/diagnostics/roblox-key") {

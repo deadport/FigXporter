@@ -1,4 +1,6 @@
 // Read-only authentication checks. Never return or log credentials.
+const createHash = require("create-hash/browser");
+
 async function DiagnoseConnection(fetchRequest, worker, apiKey, exportKey, uploaderType, uploaderId) {
     const path = "/assets/v1/operations/00000000-0000-0000-0000-000000000000";
     const probe = async (base, key) => {
@@ -26,6 +28,9 @@ async function DiagnoseConnection(fetchRequest, worker, apiKey, exportKey, uploa
     }
     return {
         inputMatchesExportKey: apiKey === exportKey,
+        inputMatchesWorkerKey: typeof keyInspection.keyFingerprint === "string"
+            ? keyInspection.keyFingerprint === createHash("sha256").update(apiKey.trim()).digest("hex")
+            : null,
         worker: results[0],
         direct: results[1],
         keyInspection
